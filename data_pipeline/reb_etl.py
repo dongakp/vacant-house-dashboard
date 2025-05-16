@@ -2,51 +2,57 @@ import sys
 from dotenv import load_dotenv
 import os
 import requests
-import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 import pandas as pd
 from tqdm.auto import tqdm
 import io
 import boto3
 
-def get_request(base_url,params):
-    response = requests.get(base_url, params=params)
+def get_response(base_url,params,option):
+    response = requests.get(base_url%option, params=params)
     if response.status_code == 200:
         data = response.json()
-        return data['SttsApiTblData']
+        return data[option]
     else:
         print("API request failled.")
         return None
 
 STATBL_ID = sys.argv[1]
-DTACYCLE_CD = sys.argv[2]
 
+option = "SttsApiTbl"
+base_url = "https://www.reb.or.kr/r-one/openapi/%s.do"
 load_dotenv()
-base_url = "https://www.reb.or.kr/r-one/openapi/SttsApiTblData.do"
 params = {
     "STATBL_ID": STATBL_ID,
-    "DTACYCLE_CD": DTACYCLE_CD,
     "Type": "json",
     "KEY": os.getenv("REB_API_ACCESS_KEY")
 }
+_, meta = get_response(base_url, params, option)
+DTACYCLE_CD = meta['row'][0]['DTACYCLE_CD']
+params["DTACYCLE_CD"] = DTACYCLE_CD
 
+option = "SttsApiTblData"
 params["pSize"]=1
-header,data = get_request(base_url, params)
+header,data = get_response(base_url, params, option)
 count = header['head'][0]['list_total_count']
 columns = list(data['row'][0].keys())
 
 params["pSize"]=1000
-iterNumb = count//params["pSize"]
-lastIter = count%params["pSize"]
+iterNumb = count//params["pSize"]+1
 response_data = []
 
-for i in tqdm(range(1,iterNumb+1)):
-    params["pIndex"]=i
-    _, data = get_request(base_url, params)
-    response_data += data['row']
-params["pIndex"]=i+1
-params["pSize"]=lastIter
-_, data = get_request(base_url, params)
-response_data += data['row']
+def fetch_page(i):
+    local_params = params.copy()
+    local_params["pIndex"] = i
+    _, data = get_response(base_url, local_params, option)
+    time.sleep(0.1)
+    return data['row'] if data else []
+
+with ThreadPoolExecutor(max_workers=10) as executor:
+    futures = [executor.submit(fetch_page, i) for i in range(1, iterNumb + 1)]
+    for future in tqdm(as_completed(futures), total=iterNumb):
+        response_data += future.result()   
 
 df = pd.DataFrame(response_data,columns=columns)
 
